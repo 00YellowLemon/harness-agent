@@ -74,7 +74,7 @@ def main():
     
     # Load system prompt from the design-skills repository
     try:
-        with open(os.path.join("design-skills", "system_prompt.md"), "r", encoding="utf-8") as f:
+        with open(os.path.join("design-docs", "system_prompt.md"), "r", encoding="utf-8") as f:
             system_prompt = f.read()
     except Exception as e:
         print(f"Warning: Could not read system prompt: {e}")
