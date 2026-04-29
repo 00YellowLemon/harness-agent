@@ -8,3 +8,5 @@ psycopg[binary]
 langchain-community
 duckduckgo-search
 tavily-python
+fastapi
+uvicorn[standard]

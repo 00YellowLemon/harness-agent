@@ -30,7 +30,7 @@ def get_model():
         )
     
     return ChatGoogleGenerativeAI(
-        model="gemini-3-flash-preview",
+        model="gemini-2.0-flash",
         vertexai=True,
         project=PROJECT_ID,
         location=LOCATION,
@@ -62,80 +62,100 @@ def web_search(
     except ImportError:
         return f"[MOCK SEARCH RESULTS FOR: {query}] - tavily-python or langchain-community not installed."
 
-def main():
-    if not PROJECT_ID:
-        print("Error: GOOGLE_CLOUD_PROJECT environment variable not set.")
-        print("Please check your .env file or environment variables.")
-        return
-
-    print(f"Initializing Gemini 3.0 Flash on Vertex AI (Project: {PROJECT_ID}, Location: {LOCATION})...")
+def get_system_prompt():
+    """Load the system prompt from the design-docs directory."""
+    # Use absolute path to ensure it works regardless of CWD
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    prompt_path = os.path.join(base_dir, "design-docs", "system_prompt.md")
     
-    llm = get_model()
-    
-    # Load system prompt from the design-skills repository
     try:
-        with open(os.path.join("design-docs", "system_prompt.md"), "r", encoding="utf-8") as f:
-            system_prompt = f.read()
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read()
     except Exception as e:
-        print(f"Warning: Could not read system prompt: {e}")
-        system_prompt = "You are a helpful autonomous design agent."
-        
-    tools = [web_search]
-    
-    # Configure the hybrid CompositeBackend
-    # - Default: Access to local files (like ./design-skills/)
-    # - /workspace/: Ephemeral state (lost when thread ends)
-    # - /memories/: Persistent store (survives across threads)
+        print(f"Warning: Could not read system prompt from {prompt_path}: {e}")
+        return "You are an expert, outcome-oriented autonomous AI Design Agent."
+
+
+def get_backend_factory():
+    """Return a backend factory for the CompositeBackend."""
     def backend_factory(rt):
         return CompositeBackend(
             default=FilesystemBackend(root_dir=".", virtual_mode=True),
             routes={
-                "/workspace/": StateBackend(),
-                "/memories/": StoreBackend()
+                "/workspace/": StateBackend(rt),
+                "/memories/": StoreBackend(rt)
             }
         )
+    return backend_factory
 
-    # Initialize persistence if POSTGRES_URL is available
+
+
+def create_agent_with_persistence():
+    """
+    Create the Deep Agent with all configured backends.
+    
+    Returns a tuple of (agent, checkpointer, store) so callers can manage
+    the lifecycle of persistence resources.
+    
+    For PostgreSQL mode, the caller is responsible for closing the
+    checkpointer and store (they are context managers).
+    For in-memory mode, no cleanup is needed.
+    """
+    if not PROJECT_ID:
+        raise ValueError(
+            "GOOGLE_CLOUD_PROJECT environment variable not set. "
+            "Please check your .env file or environment variables."
+        )
+
+    llm = get_model()
+    system_prompt = get_system_prompt()
+    tools = [web_search]
+    backend_factory = get_backend_factory()
+
     if POSTGRES_URL:
         print("Using PostgreSQL for persistence and memory...")
-        with PostgresSaver.from_conn_string(POSTGRES_URL) as checkpointer, \
-             PostgresStore.from_conn_string(POSTGRES_URL) as store:
-            
-            # Ensure database tables exist
-            checkpointer.setup()
-            store.setup()
-            
-            # Create the Deep Agent with memory and skills
-            agent = create_deep_agent(
-                model=llm,
-                tools=tools,
-                system_prompt=system_prompt,
-                checkpointer=checkpointer,
-                store=store,
-                backend=backend_factory,
-                skills=["./design-skills/"]
-            )
-            
-            run_agent_demo(agent)
+        # from_conn_string returns a context manager
+        checkpointer_cm = PostgresSaver.from_conn_string(POSTGRES_URL)
+        store_cm = PostgresStore.from_conn_string(POSTGRES_URL)
+        
+        # Enter context managers to get the actual instances
+        checkpointer = checkpointer_cm.__enter__()
+        store = store_cm.__enter__()
+        
+        # Ensure database tables exist
+        checkpointer.setup()
+        store.setup()
     else:
-        print("Warning: POSTGRES_URL not set. Running with local memory instead.")
+        print("Warning: DB_CONN not set. Running with in-memory persistence.")
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.store.memory import InMemoryStore
         
         checkpointer = MemorySaver()
         store = InMemoryStore()
-        
-        agent = create_deep_agent(
-            model=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            checkpointer=checkpointer,
-            store=store,
-            backend=backend_factory,
-            skills=["./design-skills/"]
-        )
-        
-        run_agent_demo(agent)
+
+    agent = create_deep_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+        store=store,
+        backend=backend_factory,
+        skills=["./design-skills/"]
+    )
+
+
+    return agent, checkpointer, store
+
+
+def main():
+    try:
+        agent, checkpointer, store = create_agent_with_persistence()
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+
+    print(f"Initializing Gemini 3.0 Flash on Vertex AI (Project: {PROJECT_ID}, Location: {LOCATION})...")
+    run_agent_demo(agent)
 
 def run_agent_demo(agent):
     """ Helper to run a demo conversation with the agent. """
