@@ -14,7 +14,7 @@ load_dotenv()
 
 # Configuration
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
-LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 SA_KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_PATH")
 POSTGRES_URL = os.getenv("DB_CONN")
 
@@ -30,7 +30,7 @@ def get_model():
         )
     
     return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model="gemini-3-flash-preview",
         vertexai=True,
         project=PROJECT_ID,
         location=LOCATION,
@@ -101,11 +101,10 @@ def create_agent_with_persistence():
     checkpointer and store (they are context managers).
     For in-memory mode, no cleanup is needed.
     """
+    # If PROJECT_ID is not set, we'll try to let Vertex AI find it from the environment
+    # but we print a warning instead of crashing.
     if not PROJECT_ID:
-        raise ValueError(
-            "GOOGLE_CLOUD_PROJECT environment variable not set. "
-            "Please check your .env file or environment variables."
-        )
+        print("Warning: GOOGLE_CLOUD_PROJECT not set. Vertex AI may fail if not running on GCP.")
 
     llm = get_model()
     system_prompt = get_system_prompt()
@@ -114,17 +113,26 @@ def create_agent_with_persistence():
 
     if POSTGRES_URL:
         print("Using PostgreSQL for persistence and memory...")
-        # from_conn_string returns a context manager
-        checkpointer_cm = PostgresSaver.from_conn_string(POSTGRES_URL)
-        store_cm = PostgresStore.from_conn_string(POSTGRES_URL)
+        from psycopg_pool import ConnectionPool
         
-        # Enter context managers to get the actual instances
-        checkpointer = checkpointer_cm.__enter__()
-        store = store_cm.__enter__()
+        # Explicit pool with health checks and keepalives for serverless
+        pool = ConnectionPool(
+            POSTGRES_URL,
+            max_idle=300,
+            max_lifetime=1800,
+            check=ConnectionPool.check_connection,
+            kwargs={"autocommit": True}
+        )
+        
+        checkpointer = PostgresSaver(pool)
+        store = PostgresStore(pool)
         
         # Ensure database tables exist
         checkpointer.setup()
         store.setup()
+        
+        # Patch close so server.py lifespan cleans up the pool correctly
+        checkpointer.close = pool.close
     else:
         print("Warning: DB_CONN not set. Running with in-memory persistence.")
         from langgraph.checkpoint.memory import MemorySaver

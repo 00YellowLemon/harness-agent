@@ -4,7 +4,7 @@ langchain-google-genai
 google-auth
 python-dotenv
 langgraph-checkpoint-postgres
-psycopg[binary]
+psycopg[binary,pool]
 langchain-community
 duckduckgo-search
 tavily-python
